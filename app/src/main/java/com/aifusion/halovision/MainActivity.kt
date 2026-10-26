@@ -10,8 +10,8 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.activity.result.contract.ActivityResultContracts
 import com.google.ar.core.Config
 import com.google.ar.core.Session
 import com.google.ar.core.exceptions.CameraNotAvailableException
@@ -23,6 +23,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var renderer: HaloRenderer
     private var arSession: Session? = null
     private var installRequested = false
+    private val cameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) resumeArSession() else statusView.text = "Camera permission is required to scan a room."
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,7 +61,7 @@ class MainActivity : ComponentActivity() {
         ) {
             statusView.text = "HALO VISION  •  Camera permission granted"
         } else {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), CAMERA_REQUEST)
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -122,18 +125,4 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == CAMERA_REQUEST && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            resumeArSession()
-        } else if (requestCode == CAMERA_REQUEST) {
-            statusView.text = "Camera permission is required to scan a room."
-        }
-    }
-
-    companion object {
-        private const val CAMERA_REQUEST = 1001
-    }
 }

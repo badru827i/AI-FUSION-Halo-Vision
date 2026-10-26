@@ -1,6 +1,5 @@
 package com.aifusion.halovision
 
-import android.graphics.SurfaceTexture
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
@@ -14,14 +13,10 @@ import java.util.concurrent.atomic.AtomicReference
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
-/**
- * Lightweight ARCore camera background renderer. Depth is sampled periodically
- * so the UI can confirm whether valid depth data is available on this device.
- */
+/** Minimal ARCore camera background plus a diagnostic raw-depth probe. */
 class HaloRenderer(private val onStatus: (String) -> Unit) : GLSurfaceView.Renderer {
     private val sessionRef = AtomicReference<Session?>(null)
     private var cameraTextureId = -1
-    private var surfaceTexture: SurfaceTexture? = null
     private var program = 0
     private var positionHandle = 0
     private var texCoordHandle = 0
@@ -42,6 +37,7 @@ class HaloRenderer(private val onStatus: (String) -> Unit) : GLSurfaceView.Rende
 
     fun setSession(session: Session) {
         sessionRef.set(session)
+        if (cameraTextureId >= 0) session.setCameraTextureNames(intArrayOf(cameraTextureId))
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -62,13 +58,18 @@ class HaloRenderer(private val onStatus: (String) -> Unit) : GLSurfaceView.Rende
             void main() { gl_FragColor = texture2D(uTexture, vTexCoord); }
         """.trimIndent()
 
+        val vs = compileShader(GLES20.GL_VERTEX_SHADER, vertexShader)
+        val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentShader)
         program = GLES20.glCreateProgram().also { p ->
-            val vs = compileShader(GLES20.GL_VERTEX_SHADER, vertexShader)
-            val fs = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentShader)
             GLES20.glAttachShader(p, vs)
             GLES20.glAttachShader(p, fs)
             GLES20.glLinkProgram(p)
+            val status = IntArray(1)
+            GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, status, 0)
+            if (status[0] == 0) throw IllegalStateException("Shader link failed: ${GLES20.glGetProgramInfoLog(p)}")
         }
+        GLES20.glDeleteShader(vs)
+        GLES20.glDeleteShader(fs)
         positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
         texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
         samplerHandle = GLES20.glGetUniformLocation(program, "uTexture")
@@ -81,8 +82,6 @@ class HaloRenderer(private val onStatus: (String) -> Unit) : GLSurfaceView.Rende
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-
-        surfaceTexture = SurfaceTexture(cameraTextureId)
         sessionRef.get()?.setCameraTextureNames(intArrayOf(cameraTextureId))
         GLES20.glClearColor(0f, 0f, 0f, 1f)
     }
@@ -95,31 +94,26 @@ class HaloRenderer(private val onStatus: (String) -> Unit) : GLSurfaceView.Rende
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         val session = sessionRef.get() ?: return
         try {
-            session.setCameraTextureNames(intArrayOf(cameraTextureId))
             val frame: Frame = session.update()
-            surfaceTexture?.updateTexImage()
             drawCamera()
-
             frameCount++
             val now = System.currentTimeMillis()
             if (frameCount % 15 == 0 && now - lastStatusAt > 700) {
                 lastStatusAt = now
-                val depthMessage = sampleDepth()
-                onStatus("HALO VISION  •  Tracking: ${frame.camera.trackingState}\n$depthMessage")
+                onStatus("HALO VISION  •  Tracking: ${frame.camera.trackingState}\n${sampleDepth(frame)}")
             }
         } catch (e: NotYetAvailableException) {
-            drawCamera()
+            onStatus("HALO VISION  •  Depth is warming up")
         } catch (e: Exception) {
             onStatus("Scanner paused: ${e.javaClass.simpleName}")
         }
     }
 
-    private fun sampleDepth(): String {
-        val session = sessionRef.get() ?: return "Depth: waiting for ARCore"
+    private fun sampleDepth(frame: Frame): String {
         return try {
-            val frame = session.update()
             frame.acquireRawDepthImage16Bits().use { image ->
-                val shortBuffer = image.planes[0].buffer.order(ByteOrder.nativeOrder()).asShortBuffer()
+                val shortBuffer = image.planes[0].buffer
+                    .order(ByteOrder.nativeOrder()).asShortBuffer()
                 var valid = 0
                 val step = (shortBuffer.limit() / 300).coerceAtLeast(1)
                 var i = 0
@@ -127,7 +121,7 @@ class HaloRenderer(private val onStatus: (String) -> Unit) : GLSurfaceView.Rende
                     if ((shortBuffer.get(i).toInt() and 0xFFFF) > 0) valid++
                     i += step
                 }
-                "Raw depth: ${image.width}×${image.height} · valid samples: $valid"
+                "Raw depth: ${image.width}×${image.height} · sampled valid: $valid"
             }
         } catch (_: NotYetAvailableException) {
             "Depth: collecting samples — move the phone slowly"
@@ -137,7 +131,7 @@ class HaloRenderer(private val onStatus: (String) -> Unit) : GLSurfaceView.Rende
     }
 
     private fun drawCamera() {
-        if (program == 0) return
+        if (program == 0 || cameraTextureId < 0) return
         GLES20.glUseProgram(program)
         vertices.position(0)
         GLES20.glEnableVertexAttribArray(positionHandle)
